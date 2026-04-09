@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wort-Duell Beta</title>
+  <style>
+    :root { --bg: #121826; --card: #1e2736; --accent: #00ffaa; --danger: #ff5555; --text: #e6eef5; }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
+    body { background: var(--bg); color: var(--text); display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+    .container { background: var(--card); border-radius: 16px; padding: 24px; width: 100%; max-width: 500px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+    h1 { text-align: center; margin-bottom: 20px; color: var(--accent); }
+    input, button { width: 100%; padding: 14px; margin: 8px 0; border: none; border-radius: 10px; font-size: 16px; }
+    input { background: #2a3545; color: var(--text); border: 2px solid #3a4758; }
+    input:focus { border-color: var(--accent); outline: none; }
+    button { cursor: pointer; font-weight: 600; transition: 0.2s; }
+    .btn-primary { background: var(--accent); color: #121826; }
+    .btn-danger { background: var(--danger); color: white; }
+    .btn-ghost { background: transparent; border: 2px solid #3a4758; color: #aab4c0; }
+    .hidden { display: none !important; }
+    .code-display { font-size: 28px; letter-spacing: 4px; text-align: center; background: #2a3545; padding: 12px; border-radius: 8px; margin: 12px 0; font-weight: bold; }
+    .word-reveal { font-size: 24px; text-align: center; margin: 16px 0; color: #ffd166; font-weight: bold; }
+    .chat { max-height: 250px; overflow-y: auto; background: #151b26; border-radius: 10px; padding: 12px; margin: 12px 0; }
+    .msg { padding: 8px 12px; margin: 6px 0; border-radius: 8px; font-size: 14px; word-break: break-word; }
+    .msg.question { background: #2d3b4e; margin-left: 20%; }
+    .msg.answer { background: #1e2a3a; margin-right: 20%; }
+    .msg.yes { border-left: 3px solid var(--accent); }
+    .msg.no { border-left: 3px solid var(--danger); }
+    .answer-btns { display: flex; gap: 10px; margin-top: 10px; }
+    .status { text-align: center; color: #8899a8; font-size: 14px; margin: 8px 0; }
+    #debug { font-size: 11px; color: #556; margin-top: 12px; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="screen-home">
+      <h1>🔍 Wort-Duell Beta</h1>
+      <button class="btn-primary" onclick="createGame()">Neues Spiel erstellen</button>
+      <div style="text-align: center; margin: 12px 0; color: #8899a8;">oder Code eingeben</div>
+      <input type="text" id="join-code" placeholder="6-stelliger Code (z.B. A7B2C9)">
+      <button class="btn-ghost" onclick="joinGame()">Beitreten</button>
+    </div>
+
+    <div id="screen-wait" class="hidden">
+      <h1>⏳ Warte auf Gegner</h1>
+      <div class="status">Teile diesen Code mit deinem Freund:</div>
+      <div class="code-display" id="display-code"></div>
+      <div class="status" id="wait-status">Warte auf Beitritt...</div>
+    </div>
+
+    <div id="screen-thinker" class="hidden">
+      <h1>🧠 Du bist der Denker</h1>
+      <div class="word-reveal" id="secret-word"></div>
+      <div class="chat" id="thinker-chat"></div>
+      <div class="answer-btns" id="answer-btns" style="display:none;">
+        <button class="btn-primary" onclick="answer('ja')">✅ JA</button>
+        <button class="btn-danger" onclick="answer('nein')">❌ NEIN</button>
+      </div>
+      <button class="btn-ghost" onclick="endGame()" style="margin-top:12px;">Spiel beenden</button>
+    </div>
+
+    <div id="screen-guesser" class="hidden">
+      <h1>🔍 Du bist der Rater</h1>
+      <div class="chat" id="guesser-chat"></div>
+      <input type="text" id="question-input" placeholder="Ja/Nein-Frage stellen (max. 80 Zeichen)" maxlength="80">
+      <button class="btn-primary" onclick="sendQuestion()">Frage senden</button>
+      <div style="margin-top:12px; border-top: 1px solid #3a4758; padding-top:12px;">
+        <input type="text" id="guess-input" placeholder="Wort raten..." maxlength="30">
+        <button class="btn-ghost" onclick="guessWord()">Wort eingeben</button>
+      </div>
+    </div>
+    <div id="debug"></div>
+  </div>
+
+  <script>
+    // 📡 Echtzeit-Kommunikation zwischen Tabs (kein Server nötig)
+    const channel = new BroadcastChannel('wort_duell_v1');
+    let game = null;
+    let myRole = null;
+    let myCode = null;
+
+    const $ = id => document.getElementById(id);
+    const show = id => $(id).classList.remove('hidden');
+    const hide = id => $(id).classList.add('hidden');
+    const genCode = () => Math.random().toString(36).substring(2, 8).toUpperCase();
+    const words = ["Elefant", "Pizza", "Mond", "Fahrrad", "Bibliothek", "Schmetterling", "Kaffee", "Uhr", "Regen", "Gitarre"];
+
+    function renderChat() {
+      if (!game) return;
+      const html = (game.questions || []).map(q => `
+        <div class="msg question">❓ ${q.text}</div>
+        <div class="msg answer ${q.answer === 'ja' ? 'yes' : q.answer === 'nein' ? 'no' : ''}">
+          ${q.answer ? (q.answer === 'ja' ? '✅ Ja' : '❌ Nein') : '⏳ Warte...'}
+        </div>
+      `).join('');
+      const chatId = myRole === 'thinker' ? 'thinker-chat' : 'guesser-chat';
+      $(chatId).innerHTML = html || '<div style="text-align:center;color:#667;">Noch keine Fragen.</div>';
+      $(chatId).scrollTop = $(chatId).scrollHeight;
+    }
+
+    function updateUI() {
+      $('debug').textContent = `Rolle: ${myRole} | Status: ${game?.status || 'keins'} | Code: ${myCode || '-'}`;
+      
+      hide('screen-home'); hide('screen-wait'); hide('screen-thinker'); hide('screen-guesser');
+      
+      if (!game) return;
+      if (game.status === 'waiting' && myRole === 'thinker') {
+        show('screen-wait'); $('wait-status').textContent = 'Warte auf Beitritt...';
+      } else if (game.status === 'playing' || game.status === 'finished') {
+        if (myRole === 'thinker') {
+          show('screen-thinker');
+          $('secret-word').textContent = `Geheimes Wort: ${game.secretWord}`;
+          const lastQ = game.questions?.[game.questions.length - 1];
+          $('answer-btns').style.display = (lastQ && !lastQ.answer) ? 'flex' : 'none';
+        } else {
+          show('screen-guesser');
+        }
+        renderChat();
+      }
+    }
+
+    function createGame() {
+      myCode = genCode();
+      myRole = 'thinker';
+      game = {
+        code: myCode,
+        status: 'waiting',
+        secretWord: words[Math.floor(Math.random() * words.length)],
+        questions: [],
+        updatedAt: Date.now()
+      };
+      channel.postMessage({ type: 'sync', data: game });
+      updateUI();
+    }
+
+    function joinGame() {
+      const code = $('join-code').value.trim().toUpperCase();
+      if (code.length !== 6) return alert('Code muss 6 Zeichen haben.');
+      myCode = code;
+      myRole = 'guesser';
+      channel.postMessage({ type: 'join', code: myCode });
+      updateUI();
+    }
+
+    function answer(val) {
+      if (!game || myRole !== 'thinker') return;
+      const last = game.questions?.[game.questions.length - 1];
+      if (!last || last.answer) return;
+      last.answer = val;
+      game.updatedAt = Date.now();
+      channel.postMessage({ type: 'sync',  game });
+      updateUI();
+    }
+
+    function sendQuestion() {
+      if (!game || myRole !== 'guesser') return;
+      const text = $('question-input').value.trim();
+      if (!text || text.length < 3) return alert('Mindestens 3 Zeichen.');
+      if (game.questions.length >= 20) return alert('Maximale Fragenanzahl erreicht!');
+      game.questions.push({ text, answer: null, timestamp: Date.now() });
+      game.updatedAt = Date.now();
+      channel.postMessage({ type: 'sync', data: game });
+      $('question-input').value = '';
+      updateUI();
+    }
+
+    function guessWord() {
+      const guess = $('guess-input').value.trim().toLowerCase();
+      if (!guess) return;
+      if (guess === game.secretWord.toLowerCase()) {
+        game.status = 'finished';
+        game.winner = 'guesser';
+        channel.postMessage({ type: 'sync',  game });
+        alert('🎉 Richtig! Du hast gewonnen.');
+      } else {
+        alert('❌ Falsch. Weiter raten!');
+      }
+    }
+
+    function endGame() {
+      if (!game || myRole !== 'thinker') return;
+      game.status = 'finished';
+      game.winner = 'thinker';
+      channel.postMessage({ type: 'sync',  game });
+      alert('🏆 Spiel beendet. Denker gewinnt!');
+    }
+
+    // 📥 Nachrichten von anderem Tab empfangen
+    channel.onmessage = (e) => {
+      const msg = e.data;
+      if (msg.type === 'sync' && msg.data.code === myCode) {
+        game = msg.data;
+        updateUI();
+      }
+      if (msg.type === 'join' && msg.code === myCode && myRole === 'thinker') {
+        game.status = 'playing';
+        game.guesserJoined = true;
+        game.updatedAt = Date.now();
+        channel.postMessage({ type: 'sync',  game });
+        updateUI();
+      }
+    };
+  </script>
+</body>
+</html>
